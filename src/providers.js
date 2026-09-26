@@ -158,13 +158,19 @@ function normalizeModelInput(models) {
   return out;
 }
 
-/** 从当前配置里取 provider.apiKey 对应的真实值（含旧版 top-level key 回退）。 */
+/**
+ * 从当前配置里取 provider 对应的真实 Key。
+ * ⚠️ 优先级必须与聊天路径 llm.resolveApiKey 一致：dshProviderKeys 优先，
+ * providers[].apiKey（历史遗留的明文/掩码）只作回退。曾经这里反过来以
+ * providers[].apiKey 优先，同一 provider 两处 key 并存时"测试连通性用的 key"
+ * 与"实际聊天用的 key"不同——测试通过但聊天 401（或反之）。
+ */
 function providerKeyValue(provider, cfg) {
   if (provider && typeof provider === 'object') {
-    const top = String(provider.apiKey ?? '').trim();
-    if (top && top !== '******') return top;
     const dshKey = String(cfg?.dshProviderKeys?.[provider.id] ?? '').trim();
     if (dshKey && dshKey !== '******') return dshKey;
+    const top = String(provider.apiKey ?? '').trim();
+    if (top && top !== '******') return top;
   }
   return '';
 }
@@ -179,7 +185,7 @@ function withResolvedKey(p, cfg = getConfig()) {
  *  中转站转发时域名不是 opencode.ai，要靠模型 id 的 opencode-go/ 前缀识别。 */
 function opencodeHeaders(baseUrl, model = '') {
   if (!/opencode\.ai/i.test(String(baseUrl)) && !/^opencode-go\//i.test(String(model || ''))) return {};
-  return { 'x-opencode-session': `qqagent-probe-${process.pid}`, 'user-agent': 'qq-agent/0.3' };
+  return { 'x-opencode-session': `qqagent-probe-${process.pid}`, 'user-agent': 'qq-agent/0.4' };
 }
 
 /** 用指定 baseUrl/key 获取模型列表（OpenAI /models）。 */
@@ -261,6 +267,12 @@ export function upsertProvider({ baseUrl, apiKey, models = [] }) {
     for (const m of entries) {
       if (!existing.models.includes(m.id)) existing.models.push(m.id);
     }
+    // ⚠️ modelNames 的合并必须在 updateConfig **之前**完成：
+    //   曾经先 updateConfig（内部 structuredClone 出配置快照落盘）、
+    //   再改局部 existing.modelNames —— 返回值（内存对象）带着新名字，
+    //   但 currentConfig 与磁盘上都没有，重启后新增模型的显示名丢失。
+    existing.modelNames = { ...(existing.modelNames || {}) };
+    for (const m of entries) existing.modelNames[m.id] = m.name;
     if (apiKey) {
       const keys = { ...(getConfig().dshProviderKeys || {}) };
       keys[existing.id] = String(apiKey).trim();
@@ -268,8 +280,6 @@ export function upsertProvider({ baseUrl, apiKey, models = [] }) {
     } else {
       updateConfig({ providers });
     }
-    existing.modelNames = { ...(existing.modelNames || {}) };
-    for (const m of entries) existing.modelNames[m.id] = m.name;
     return { provider: withResolvedKey(existing), created: false };
   }
   const id = `custom_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
@@ -321,6 +331,35 @@ export function removeModelFromProvider(providerId, modelId) {
   }
   updateConfig({ providers: providers.map((x) => { const { apiKey, ...rest } = x; return rest; }) });
   return p;
+}
+
+/**
+ * 删除整个提供商（含它的 Key 与模型目录）。
+ * 若当前选中的模型正好属于这个提供商，同时清空 api.provider / api.model，
+ * 避免配置指向一个已不存在的提供商（那样 resolveApiKey 会拿到死 Key）。
+ * @returns {boolean} 是否真的删掉了（提供商不存在返回 false）
+ */
+export function removeProvider(providerId) {
+  const pid = String(providerId ?? '').trim();
+  if (!pid) return false;
+  const cfg = getConfig();
+  const providers = (cfg.providers || []).filter((p) => p.id !== pid);
+  if (providers.length === (cfg.providers || []).length) return false;   // 没找到
+
+  // 清掉这个提供商的 Key（__replace__ 整体替换：普通深合并传 {} 删不掉已有键）
+  const keys = { ...(cfg.dshProviderKeys || {}) };
+  delete keys[pid];
+
+  const patch = {
+    providers: { __replace__: providers },
+    dshProviderKeys: { __replace__: keys }
+  };
+  // 当前选中的提供商被删 → 一并清空选中态，回落到"未选择"
+  if (String(cfg.api?.provider ?? '') === pid) {
+    patch.api = { provider: '', model: '' };
+  }
+  updateConfig(patch);
+  return true;
 }
 
 // ── 连通性测试：GET {baseURL}/models（OpenAI 兼容探测） ────────────────────

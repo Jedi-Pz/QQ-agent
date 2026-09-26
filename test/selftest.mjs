@@ -338,8 +338,8 @@ refs:
   assert.strictEqual(req1.messages[0].role, 'system');
   assert.strictEqual(req1.messages[1].role, 'user');
   const user1 = req1.messages[1].content;
-  assert.ok(user1.includes('【本次唤醒】') && user1.includes('在吗？'), '用户消息含本次唤醒与触发文本');
-  assert.ok(user1.includes('【当前时间】') && user1.includes('【过去状态】'), '用户消息含时间与过去状态');
+  assert.ok(user1.includes('【未读信息】') && user1.includes('在吗？'), '用户消息含未读信息与触发文本');
+  assert.ok(user1.includes('【当前时间】') && user1.includes('【已读信息】'), '用户消息含时间与已读信息');
   assert.ok(req1.tools?.some((t) => t.function.name === 'send_message'), 'send_message 工具已暴露');
   const toolNames = req1.tools.map((t) => t.function.name);
   assert.ok(!toolNames.some((n) => n.includes('qq_')), '工具名不带 qq_ 前缀');
@@ -379,7 +379,7 @@ refs:
   await waitFor(() => llm.state.requests.length >= reqsBeforeA + 2, 6000, 'drain 运行开始');
   const drainReq = llm.state.requests.at(-1);
   assert.strictEqual(drainReq.messages.length, 2, 'drain 运行同样是全新会话（零历史）');
-  assert.ok(drainReq.messages[1].content.includes('处理期间插进来的新消息'), 'drain 运行的【本次唤醒】是处理期间插入的消息');
+  assert.ok(drainReq.messages[1].content.includes('处理期间插进来的新消息'), 'drain 运行的【未读信息】是处理期间插入的消息');
   assert.ok(!drainReq.messages[1].content.includes('在的"') || drainReq.messages[1].content.includes('我：在的'), '此前发言只以存档形式出现');
   await waitSessionDone('处理期间插进来的新消息');
   pass('drain 循环：运行中新消息 → 结束后自动新开会话处理，每次 messages.length=2');
@@ -932,19 +932,20 @@ refs:
     pass('出错自动重试：两次重试后停止，4xx 不重试');
   }
 
-  // ── 场景 29：响应档位（是否响应 + 各档条数独立）──
+  // ── 场景 29：响应档位（是否响应；各档读取条数统一 historyCount）──
   {
     const { resolveContextTier, isAtMe, hitKeyword } = await import('../src/prompt.js');
-    const OPT = { selfNickname: '小鲸鱼', botName: '小鲸鱼', selfId: '3113678561' };
-    // 各档条数刻意设成不同值，便于验证"触发原因决定条数"
+    const OPT = { selfNickname: '小鲸鱼', botName: '小鲸鱼', selfId: '123456789' };
+    // 2026-09-25 改版：四个分档条数字段废弃，各档统一 historyCount。
+    // 老配置只有 allCount 时应作为迁移兜底（historyCount 缺省回落它）。
     const CFG = {
-      contextTier: 1, atCount: 5, keywordCount: 10,
-      keywords: ['大肥鱼'], randomPercent: 10, randomCount: 20, allCount: 50
+      contextTier: 1, keywords: ['大肥鱼'], randomPercent: 10, historyCount: 50
     };
+    const CFG_LEGACY = { ...CFG, historyCount: undefined, allCount: 50 };
 
     // 艾特检测：@昵称 / CQ 码
     assert.ok(isAtMe('@小鲸鱼 在吗', OPT), '@昵称应识别为艾特');
-    assert.ok(isAtMe('[CQ:at,qq=3113678561] x', OPT), 'CQ 码艾特自己应识别');
+    assert.ok(isAtMe('[CQ:at,qq=123456789] x', OPT), 'CQ 码艾特自己应识别');
     assert.ok(!isAtMe('[CQ:at,qq=999] x', OPT), '艾特别人不应识别');
     assert.ok(!isAtMe('天气不错', OPT), '普通消息不应识别');
 
@@ -953,29 +954,35 @@ refs:
     assert.ok(hitKeyword('BOT x', ['bot']), '关键词应不区分大小写');
     assert.ok(!hitKeyword('x', []), '空关键词表不命中');
 
-    const at = [{ text: '[CQ:at,qq=3113678561] 在吗' }];   // 纯艾特，不含关键词
+    const at = [{ text: '[CQ:at,qq=123456789] 在吗' }];   // 纯艾特，不含关键词
     const kw = [{ text: '大肥鱼 帮我' }];
     const plain = [{ text: '今天天气不错' }];
 
-    // ── 核心：各档条数独立，由"触发原因"决定，不是由"档位上限"决定 ──
+    // ── 核心：档位只决定"是否响应"，读取条数一律 historyCount ──
     const tbl = [
-      // [档位, 消息, 应响应?, 应带已读条数, 说明]
-      [1, at, true, 5, '1档+艾特 → atCount'],
-      [1, kw, false, 0, '1档+关键词 → 不响应'],
-      [1, plain, false, 0, '1档+普通 → 不响应'],
-      [2, at, true, 5, '2档+艾特 → 仍是艾特档 5 条'],
-      [2, kw, true, 10, '2档+关键词 → keywordCount'],
-      [2, plain, false, 0, '2档+普通 → 不响应'],
-      [3, at, true, 5, '3档+艾特 → 仍是艾特档 5 条（关键）'],
-      [3, kw, true, 10, '3档+关键词 → 仍是关键词档 10 条'],
-      [3, plain, true, 20, '3档+普通随机命中 → randomCount'],
-      [4, plain, true, 50, '4档+普通 → allCount']
+      // [档位, 消息, 应响应?, 说明]
+      [1, at, true, '1档+艾特 → 响应'],
+      [1, kw, false, '1档+关键词 → 不响应'],
+      [1, plain, false, '1档+普通 → 不响应'],
+      [2, at, true, '2档+艾特 → 响应'],
+      [2, kw, true, '2档+关键词 → 响应'],
+      [2, plain, false, '2档+普通 → 不响应'],
+      [3, at, true, '3档+艾特 → 响应'],
+      [3, kw, true, '3档+关键词 → 响应'],
+      [3, plain, true, '3档+普通随机命中 → 响应'],
+      [4, plain, true, '4档+普通 → 响应（全响应兜底）']
     ];
-    for (const [tier, ents, should, count, desc] of tbl) {
+    for (const [tier, ents, should, desc] of tbl) {
       const r = resolveContextTier({ triggerEntries: ents, cfg: { ...CFG, contextTier: tier }, ...OPT, roll: 5 });
       assert.equal(r.shouldRespond, should, `${desc}：shouldRespond 应为 ${should}`);
-      assert.equal(r.count, count, `${desc}：应带 ${count} 条，实际 ${r.count}`);
+      // 响应时条数统一为 historyCount（不再是各档独立值）
+      if (should) assert.equal(r.count, 50, `${desc}：应带 50 条（统一 historyCount），实际 ${r.count}`);
+      else assert.equal(r.count, 0, `${desc}：不响应应带 0 条`);
     }
+
+    // 老配置迁移兜底：只有 allCount 没有 historyCount → 条数取 allCount
+    const rLegacy = resolveContextTier({ triggerEntries: at, cfg: { ...CFG_LEGACY, contextTier: 1 }, ...OPT });
+    assert.equal(rLegacy.count, 50, '老配置（仅 allCount）应回落到 allCount 的值');
 
     // 随机未中时不响应（1~3 档）
     for (const tier of [1, 2, 3]) {
@@ -991,7 +998,14 @@ refs:
     const a = resolveContextTier({ triggerEntries: plain, cfg: { ...CFG, contextTier: 3 }, ...OPT, roll: 5 });
     const b = resolveContextTier({ triggerEntries: plain, cfg: { ...CFG, contextTier: 3 }, ...OPT, roll: 5 });
     assert.equal(a.tier, b.tier, '同一 roll 结果应一致（不重掷）');
-    pass('响应档位：未命中不响应，各档已读条数互相独立');
+
+    // 私聊恒响应：即使全局压到 1 档（仅被艾特），私聊消息也必须创建会话
+    // （1v1 没有 @ 机制，套群聊档位会让私聊全灭——2026-09-11 实修）
+    const pv = resolveContextTier({ triggerEntries: plain, cfg: { ...CFG, contextTier: 1, randomPercent: 0, keywords: [] }, ...OPT, roll: 99, isPrivate: true });
+    assert.equal(pv.shouldRespond, true, '私聊在 1 档下也必须响应');
+    assert.equal(pv.tier, 4, '私聊按全部响应档取历史');
+    assert.equal(pv.count, 50, '私聊读取条数同 historyCount');
+    pass('响应档位：未命中不响应，各档读取条数统一 historyCount + 私聊恒响应');
   }
 
   // ── 场景 30：关键控件的基础样式完整性 ──
@@ -1237,13 +1251,17 @@ refs:
     // 后端权威派生：只传滑条位置，后端应算出档位与概率
     const { updateConfig } = await import('../src/config.js');
     const fs2 = await import('node:fs');
-    const backup = fs2.readFileSync('data/config.json', 'utf8');
+    // ⚠️ 必须用隔离数据目录里的 config.json，不能写死成相对路径 'data/config.json'：
+    //   1) 全新 clone / sanitize-release 之后 data/ 不存在 → readFileSync 抛 ENOENT，npm test 直接失败
+    //   2) 会无谓重写用户真实配置，与正在运行的实例抢同一个文件
+    const isolatedConfig = path.join(dataDir, 'config.json');
+    const backup = fs2.readFileSync(isolatedConfig, 'utf8');
     try {
       const n = updateConfig({ store: { contextSliderPos: 55 } });
       assert.equal(n.store.contextTier, 3, '后端应把 55% 派生为 3 档');
       assert.ok(Math.abs(n.store.randomPercent - 50) < 1, '后端应把 55% 派生为 50% 概率');
     } finally {
-      fs2.writeFileSync('data/config.json', backup, 'utf8');
+      fs2.writeFileSync(isolatedConfig, backup, 'utf8');
     }
     pass('响应档位滑条：分区 + 概率线性 + 后端权威派生');
   }
@@ -1288,7 +1306,7 @@ refs:
 
   // ── 场景 35：远程价格表（校验/规范化 + 覆盖优先级 + 接口）──
   {
-    const { normalizePriceFeed, refreshPriceFeed, priceFeedStatus } = await import('../src/price-feed.js');
+    const { normalizePriceFeed, refreshPriceFeed, priceFeedStatus, setPriceFeedTestUrl } = await import('../src/price-feed.js');
     const { resolveOfficialPrice, setRemotePrices, listOfficialPrices } = await import('../src/model-prices.js');
 
     // ① 四种外形都能解析
@@ -1328,6 +1346,7 @@ refs:
     });
     await new Promise((r) => feedServer.listen(0, '127.0.0.1', r));
     const feedUrl = `http://127.0.0.1:${feedServer.address().port}/prices.json`;
+    setPriceFeedTestUrl(feedUrl);
     const st1 = await refreshPriceFeed(feedUrl);
     assert.ok(st1.ok && st1.source === 'remote', '应从远程拉取成功');
     assert.equal(resolveOfficialPrice('test-remote-live').in, 7, '拉到的条目应立即可查');
@@ -1339,14 +1358,16 @@ refs:
     assert.ok(!st2.ok && st2.error, '连接失败应报告错误');
     assert.equal(resolveOfficialPrice('test-remote-live').in, 7, '拉取失败不能清掉已有远程表');
     setRemotePrices({});   // 收尾还原
+    setPriceFeedTestUrl('');
 
     // ⑤ 接口：/api/model-prices 必须带 remote 状态；/api/model-prices/refresh 必须存在（不能 404）
     const get = async (p) => (await (await fetch(`http://127.0.0.1:${cfg.server.port}${p}`)).json());
     const mp = await get('/api/model-prices');
     assert.ok(mp.remote && typeof mp.remote.enabled === 'boolean', 'model-prices 应带 remote 状态');
     const rr = await (await fetch(`http://127.0.0.1:${cfg.server.port}/api/model-prices/refresh`, { method: 'POST' })).json();
-    assert.ok(rr.remote, 'refresh 接口应返回 remote 状态（未配置 URL 时 enabled=false）');
-    assert.equal(rr.remote.enabled, false, '自测环境未配置 URL，应为未启用');
+    assert.ok(rr.remote, 'refresh 接口应返回 remote 状态（固定官网 URL）');
+    assert.equal(rr.remote.enabled, true, '生产价格表地址固定，刷新接口应保持启用');
+    assert.equal(rr.remote.url, 'https://kondius.cn/qq-agent/model-prices.json', '价格表 URL 必须固定为官网地址（https，防 MITM 篡改成本展示）');
 
     pass('远程价格表：四种格式解析 + 覆盖优先级 + 失败不清表 + 接口齐全');
   }
@@ -1363,7 +1384,7 @@ refs:
       return hit && String(hit.text).includes('合并转发') ? hit : null;
     }, 8000, '合并转发消息入档并展开');
     assert.ok(msgs.text.includes('[合并转发 共2条]'), '应有合并转发头');
-    assert.ok(msgs.text.includes('转发者A: 第一段转发内容，谁懂'), '应展开文字节点');
+    assert.ok(msgs.text.includes('转发者A(QQ:1001): 第一段转发内容，谁懂'), '应展开文字节点（发言人带 QQ 号）');
     assert.ok(msgs.text.includes('转发者B'), '应展开带图节点');
     const imgMedia = (msgs.media || []).find((x) => x.file === 'fwd.png');
     assert.ok(imgMedia, '转发里的图片应进 media（取图/金句可用）');
@@ -1379,7 +1400,7 @@ refs:
       text: '[转发消息 id=oldExpiredResId]'
     });
     const { buildToolDefs } = await import('../src/tools.js');
-    const tool = buildToolDefs().find((t) => t.name === 'read_forward');
+    const tool = buildToolDefs().find((t) => t.id === 'read_forward' || t.name === 'read_forward');
     assert.ok(tool, 'read_forward 工具必须存在');
     const ctx = { chatKey: 'group:456', store: app.store, onebot: app.onebot };
     const r = await tool.execute(ctx, { messageId: 9400 });
@@ -1396,6 +1417,91 @@ refs:
     const r3 = await tool.execute(ctx, { messageId: 999999 });
     assert.ok(r3.isError && r3.content.includes('#数字'), '找不到时应提示用 #数字');
     pass('read_forward 工具：按需展开 + 写回存档 + 二次读缓存 + 错误提示');
+  }
+
+  // ── 场景 38：发送去重安全语义（回退防线，2026-09-13 二次实修）──
+  {
+    const { SendQueue } = await import('../src/sender.js');
+    const { setRuntimeConfig, getConfig } = await import('../src/config.js');
+    const baseCfg = getConfig();
+    const setSend = (patch) => setRuntimeConfig({ ...baseCfg, send: { ...baseCfg.send, minGapMs: 200, maxGapMs: 200, ...patch } });
+    const makeQueue = () => {
+      const sent = [];
+      let failNext = false;
+      const onebot = {
+        async sendText(_kind, _id, text) {
+          if (failNext) { failNext = false; throw new Error('模拟 OneBot 发送失败'); }
+          sent.push(text);
+          return { message_id: sent.length };
+        }
+      };
+      return { queue: new SendQueue({ onebot, store: { appendSelf() {} } }), sent, failNext() { failNext = true; } };
+    };
+    try {
+      // 窗口期内相同文本只发一次
+      setSend({ dedupeWindowMs: 8000 });
+      const a = makeQueue();
+      await a.queue.sendTextBatch('group:456', ['去重测试']);
+      const second = await a.queue.sendTextBatch('group:456', ['去重测试']);
+      assert.equal(a.sent.length, 1, '窗口期内相同文本只应发一次');
+      assert.ok(second.sent[0]?.deduped, '第二次应被标记 deduped');
+      // dedupeWindowMs=0 必须真的关闭（`Number(0)||8000` 的经典坑）
+      setSend({ dedupeWindowMs: 0 });
+      const b = makeQueue();
+      await b.queue.sendTextBatch('group:456', ['关闭去重']);
+      await b.queue.sendTextBatch('group:456', ['关闭去重']);
+      assert.equal(b.sent.length, 2, 'dedupeWindowMs=0 时两条都应发出');
+      // 发送失败不能被误判为重复：失败后重试必须真的发出去
+      setSend({ dedupeWindowMs: 8000 });
+      const c = makeQueue();
+      c.failNext();
+      await assert.rejects(() => c.queue.sendTextBatch('group:456', ['失败重试']), /模拟 OneBot 发送失败/);
+      const retry = await c.queue.sendTextBatch('group:456', ['失败重试']);
+      assert.equal(c.sent.length, 1, '失败后的重试必须真的发出');
+      assert.ok(!retry.sent[0]?.deduped, '失败重试不应被判定为重复');
+    } finally {
+      setRuntimeConfig(baseCfg);
+    }
+    pass('发送去重：窗口内跳过、0 可关闭、失败可重试（成功才记账）');
+  }
+
+  // ── 场景 39：本地收藏表情路径白名单（防本地文件被当表情发出）──
+  {
+    const { localStickerPath } = await import('../src/sticker-manager.js');
+    const imgDir = path.join(dataDir, 'sticker-images');
+    fs.mkdirSync(imgDir, { recursive: true });
+    const inside = path.join(imgDir, 'ok.png');
+    fs.writeFileSync(inside, Buffer.from('89504e470d0a1a0a', 'hex'));
+    const outside = path.join(dataDir, 'config.json');
+    assert.ok(localStickerPath(`file:///${inside.replace(/\\/g, '/')}`), '收藏目录内的本地图片应放行');
+    assert.ok(!localStickerPath(`file:///${outside.replace(/\\/g, '/')}`), '收藏目录外的文件必须拒绝');
+    assert.ok(!localStickerPath('http://example.com/a.png'), '非 file URI 应返回 null');
+    pass('本地表情路径：只允许收藏目录内的文件');
+  }
+
+  // ── 场景 40：提醒时间严格校验 + 工具名函数名规范 ──
+  {
+    const { buildToolDefs } = await import('../src/tools.js');
+    const defs = buildToolDefs();
+    const setReminder = defs.find((t) => t.id === 'set_reminder');
+    assert.ok(setReminder, 'set_reminder 工具必须存在');
+    const added = [];
+    const ctx = {
+      chatKey: 'group:456', selfId: '888',
+      reminders: {
+        add: (r) => { const e = { id: `r_test_${added.length}`, ...r }; added.push(e); return e; },
+        cancel: () => true, pending: () => added
+      }
+    };
+    // Date 自动归一化的非法日期必须被拒（2 月 31 日不能变成 3 月 3 日）
+    assert.ok((await setReminder.execute(ctx, { text: '开会', atTime: '2027-02-31 10:00' })).isError, '2027-02-31 应被拒绝');
+    assert.ok((await setReminder.execute(ctx, { text: '开会', atTime: '25:00' })).isError, '25:00 应被拒绝');
+    assert.ok((await setReminder.execute(ctx, { text: '开会', atTime: '2027-01-01 10:00 附加尾巴' })).isError, '带尾随字符的时间应被拒绝');
+    assert.ok(!(await setReminder.execute(ctx, { text: '开会', atTime: '2027-01-01 10:00' })).isError, '合法时间应通过');
+    // 所有工具 id 必须落在 OpenAI 函数名字符集内，否则严格端点对整个请求 400
+    const badNames = defs.filter((d) => !/^[a-zA-Z0-9_-]{1,64}$/.test(String(d.id)));
+    assert.equal(badNames.length, 0, `工具名含非法字符：${badNames.map((d) => d.id).join(', ')}`);
+    pass('提醒时间严格校验 + 工具 id 全部符合函数名规范');
   }
 
   // ── 收尾 ──

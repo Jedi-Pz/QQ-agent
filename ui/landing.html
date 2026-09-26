@@ -15,6 +15,12 @@
     } catch (e) { document.documentElement.classList.add('light'); }
   })();
 </script>
+<!-- ⚠️ 部署注意（2026-09-14 踩过坑）：
+     本文件是线上 kondius.cn/qq-agent 的落地页，依赖站点统一主题包
+     /assets/theme.css + /assets/theme.js 提供：流动背景 / 极光 / 粒子连线 /
+     鼠标拖尾 / 波浪点击 / 滚动入场 / 备案页脚。
+     曾经把"自包含版"直接覆盖到线上，整套站点特效当场消失 —— 别再这么干。
+     本地直开（没有 /assets/ 时）由下方 .no-theme 兜底背景，不影响预览。 -->
 <!-- Kondius 统一主题包：流动背景 / 极光 / 粒子连线 / 鼠标拖尾 / 波浪点击 / 滚动入场 / 备案页脚（自动注入） -->
 <link rel="stylesheet" href="/assets/theme.css" />
 <script src="/assets/theme.js" defer></script>
@@ -139,6 +145,11 @@ footer a { color: var(--muted); }
   .tb-name { width: 64px; }
   .tb-code { display: none; }
 }
+
+/* 本地预览兜底：/assets/theme.css 不存在时（直开文件、非站点环境），
+   页面背景会失去来源，这里补一层底色，避免裸白/裸黑。 */
+html.no-theme:not(.dark) body { background: #eef2f8; }
+html.no-theme.dark body { background: #0d1726; }
 </style>
 </head>
 <body>
@@ -148,7 +159,9 @@ footer a { color: var(--muted); }
   <div class="nav-btns">
     <a class="nav-pill p-primary" href="/qq-agent/comments" target="_blank" rel="noopener">意见箱</a>
     <a class="nav-pill p-primary" href="/qq-agent/holyshits" target="_blank" rel="noopener">雷霆语录</a>
-    <button class="nav-pill p-accent" type="button" id="groupQrBtn">大肥鱼群：1098345913</button>
+    <a class="nav-pill p-primary" href="/qq-agent/skill-market/">Skill 市场</a>
+    <a class="nav-pill p-accent" href="/qq-agent/persona-plaza/">人设广场</a>
+    <button class="nav-pill p-accent" type="button" id="groupQrBtn">官方交流群</button>
     <a class="nav-pill p-sm" href="https://kondius.cn" target="_blank" rel="noopener">作者的博客？！</a>
   </div>
 </div></nav>
@@ -158,7 +171,7 @@ footer a { color: var(--muted); }
   <h1>把 AI 机器人装进你的 QQ 群，<br><em>十分钟跑起来</em></h1>
   <p>本地运行、可视化控制台、双向记忆、按量计费——一个懂群友的 QQ 机器人，从这里开始。</p>
   <div class="hero-row">
-    <a class="btn btn-primary" href="qq-agent-v0.3-setup.exe" download>下载安装包（Windows）</a>
+    <a class="btn btn-primary" href="QQ-Agent-V0.4-Preview-Setup.exe" download>下载安装包（Windows）</a>
     <a class="btn btn-ghost" href="https://github.com/K0nd1us/QQ-agent" target="_blank" rel="noopener">GitHub 仓库</a>
   </div>
   <div class="hero-note">安装即用 · 自带 Electron 环境 · 约 80MB</div>
@@ -306,6 +319,14 @@ const TOOL_CAT_ORDER = ['发言', '查看', '表情', '记忆', '联网', '其�
     })
     .catch(function () {});
 })();
+</script>
+<script>
+// 主题包未加载（本地预览）时打标记，启用自带兜底背景
+addEventListener('load', function () {
+  if (!document.getElementById('th-flow-bg') && !document.getElementById('th-canvas')) {
+    document.documentElement.classList.add('no-theme');
+  }
+});
 </script>
 </body>
 </html>

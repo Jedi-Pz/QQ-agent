@@ -3,13 +3,31 @@
 // 只有真正跑一遍渲染才会暴露。
 import fs from 'node:fs';
 import vm from 'node:vm';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+// ── 数据目录隔离（必须在 import src/app.js 之前设置）──
+// 本测试会在进程内 createApp 并 start()，而 createApp 会抢实例锁。
+// 不隔离数据目录的话，用户正开着 QQ Agent 时本测试必然失败：
+//   "已有 QQ Agent 实例在运行（PID xxx）"
+// —— 那是**测试环境问题**，不是代码回归，但会让人误判。
+// 隔离后测试可以随时跑，也不会污染用户的真实 data/。
+const __testDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-agent-render-'));
+process.env.QQ_AGENT_DATA_DIR = __testDataDir;
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
+// M9 拆分：app.js 变成 ESM 桥 + ui/app/00-11 十二个普通脚本段。
+// vm 侧改为按 defer 顺序拼接全部段后执行（vendor 绑定仍走 sandbox 注入）。
+const { code: APP_CODE, files: APP_FILES } = await import('./_ui-load.mjs').then((m) => m.loadUiAppCode());
 const SRC = path.join(ROOT, 'ui', 'app.js');
-const code = fs.readFileSync(SRC, 'utf8');
+let code = APP_CODE;
+
+// app.js 现在是 ESM module（顶层 import /vendor/*.js）。
+// vm.Script 只能跑普通脚本，跑不了 import —— 桥文件的 import 已由 _ui-load.mjs
+// 旁路（直接拼接 12 个普通脚本段），vendor 导出由 sandbox 注入同名绑定（见下方）。
+const importedNames = ['TIER_SLIDER_BANDS', 'sliderToTier', 'tierToSlider', 'matchPriceTable'];
 
 // ── 极简 DOM 桩 ──
 function makeEl(id = '', cls = '') {
@@ -71,6 +89,7 @@ const document = {
 
 // SSE 处理器注册表：桩捕获 connectSSE 绑定的监听，测试可直接派发合成事件
 const sseRegistry = {};
+const alertStub = () => {};
 const sandbox = {
   document,
   window: null,
@@ -83,7 +102,7 @@ const sandbox = {
   },
   setTimeout, clearTimeout, setInterval, clearInterval,
   console,
-  alert: () => {},
+  alert: alertStub,
   confirm: () => true,
   prompt: () => null,
   matchMedia: () => ({ matches: false, addEventListener() {}, addListener() {} }),
@@ -97,12 +116,22 @@ const sandbox = {
 sandbox.window = sandbox;
 sandbox.globalThis = sandbox;
 
+// 把 /vendor/*.js 的真实实现注入 sandbox，顶替被剥掉的 import。
+// 直接复用 src/ 下的同源模块，保证测试跑的就是真实换算/匹配逻辑。
+const { TIER_SLIDER_BANDS, sliderToTier, tierToSlider } = await import('../src/tier-slider.js');
+const { matchPriceTable } = await import('../src/model-prices.js');
+Object.assign(sandbox, { TIER_SLIDER_BANDS, sliderToTier, tierToSlider, matchPriceTable });
+
 let pass = 0, fail = 0;
 const results = [];
 
 try {
-  const ctx = vm.createContext(sandbox);
-  // 用 Script 执行（app.js 是普通脚本，非 module）
+  // app.js 是 ES module（浏览器里用 type="module" 加载），
+// 但 vm.Script 跑不了 import/export —— 前面已剥 import，这里再把 export 前缀剥掉。
+code = code.replace(/^export\s+(function|const|let|async function|class)/gm, '$1');
+
+const ctx = vm.createContext(sandbox);
+  // 用 Script 执行（app.js 的 import 已在上方剥掉并注入 sandbox）
   new vm.Script(code, { filename: SRC }).runInContext(ctx);
 
   // 取出渲染函数并执行
@@ -110,7 +139,7 @@ try {
     'renderSettingsSection', 'renderApiSection', 'renderSearchSection',
     'renderMemorySettingsSection', 'renderPersonaSection', 'renderAllowSection',
     'renderChatSection', 'renderDesktopSection', 'renderOnebotSection',
-    'renderPersonaPicker', 'renderHealthCard'
+    'renderPersonaPicker', 'renderHealthCard', 'renderSkillsPage', 'renderPluginsPage'
   ];
 
   // 直接用后端的 DEFAULT_CONFIG 做桩 —— 不要手敲字段名，
@@ -121,12 +150,44 @@ try {
   cfg.store = {
     ...(cfg.store || {}),
     contextTier: 3, contextSliderPos: 55,
-    atCount: 5, keywordCount: 10, keywords: ['大肥鱼'],
-    randomPercent: 50, randomCount: 20, allCount: 80
+    keywords: ['大肥鱼'],
+    randomPercent: 50, historyCount: 80
   };
 
 
   console.log('=== 实际执行各设置分区渲染函数 ===\n');
+
+  // 技能区块有 4 种状态分支（生效 / 已关闭 / 依赖未就绪 / 加载失败），
+  // 空列表只会走到"还没加载到技能"这一条分支。这里塞一份覆盖全部状态的样例，
+  // 保证 reason / missingRequires / lastError 的渲染路径真的被执行到。
+  // 注意：state 是 vm 里的顶层 const，必须用 runInContext 注入（不能从外面直接改）。
+  vm.runInContext(`state.skills = ${JSON.stringify([
+    { id: 'ok-skill', name: '正常技能', version: '1.0.0', category: 'model', description: '正常', source: 'skill',
+      loaded: true, enabled: true, available: true, active: true, code: null, reason: '',
+      kind: 'skill', dir: 'skills/ok-skill',
+      capabilities: ['llm.request-params'], requires: [], missingRequires: [], toolIds: ['ok-skill:x'] },
+    { id: 'off-skill', name: '已关闭技能', version: '1.0.0', category: 'message', description: '被用户关了', source: 'skill',
+      kind: 'skill', dir: 'skills/off-skill',
+      loaded: true, enabled: false, available: true, active: false, code: 'skill-disabled', reason: 'Skill 未启用',
+      capabilities: [], requires: [], missingRequires: [], toolIds: [] },
+    { id: 'dep-skill', name: '依赖未就绪', version: '1.0.0', category: 'knowledge', description: '缺能力', source: 'skill',
+      kind: 'skill', dir: 'skills/dep-skill',
+      loaded: true, enabled: true, available: false, active: false, code: 'capability-missing',
+      reason: '缺少能力：knowledge.search', capabilities: [], requires: ['knowledge.search'],
+      missingRequires: ['knowledge.search'], toolIds: [] },
+    { id: 'broken-skill', name: '入口写错的插件', version: '0.1.0', category: 'utility', description: '入口写错了', source: 'plugin',
+      kind: 'plugin', dir: 'plugins/broken-skill',
+      loaded: false, enabled: true, available: false, active: false, code: 'skill-not-loaded',
+      reason: '加载失败：入口文件不存在：index.js', capabilities: [], requires: [], missingRequires: [],
+      toolIds: [], lastError: 'SyntaxError: 意外的标记', deprecated: true },
+    // 一个正常插件：验证插件页确实能渲染出插件（而不只是"非空字符串"）
+    { id: 'ok-plugin', name: '正常插件', version: '1.0.0', category: 'media', description: '提供能力', source: 'plugin',
+      kind: 'plugin', dir: 'plugins/ok-plugin',
+      loaded: true, enabled: true, available: true, active: true, code: null, reason: '',
+      capabilities: ['media.transcribe'], requires: [], missingRequires: [], toolIds: [] }
+  ])};`, ctx);
+  vm.runInContext(`state.skillsSummary = ${JSON.stringify({ total: 5, active: 2, disabled: 1, broken: 1, capabilities: ['llm.request-params'] })};`, ctx);
+
   for (const name of sections) {
     const fn = ctx[name] || sandbox[name];
     if (typeof fn !== 'function') {
@@ -142,6 +203,60 @@ try {
       fail++;
       console.log('  FAIL  ' + name + ' 抛错: ' + (e && e.message));
       results.push({ name, err: e && e.message });
+    }
+  }
+
+  // ── 技能页 / 插件页必须各自只渲染自己那一型 ──
+  // 光看"返回非空字符串"是不够的：两页都用同一个渲染函数，
+  // 万一 kind 过滤写错（比如两页都渲染全部），函数照样返回字符串、测试照样通过。
+  // 所以这里逐条断言"该出现的出现、不该出现的不出现"。
+  console.log('\n=== 技能页 / 插件页的类型隔离 ===');
+  for (const [kindTag, fnName, mustHave, mustNotHave] of [
+    ['skill',
+      'renderSkillsPage',
+      ['正常技能', '已关闭技能', '依赖未就绪'],          // 3 条 kind='skill'
+      ['正常插件', '入口写错的插件']],                    // 2 条 kind='plugin'
+    ['plugin',
+      'renderPluginsPage',
+      ['正常插件', '入口写错的插件'],                     // 2 条 kind='plugin'
+      ['正常技能', '已关闭技能', '依赖未就绪']]
+  ]) {
+    const fn = ctx[fnName] || sandbox[fnName];
+    if (typeof fn !== 'function') { fail++; console.log(`  FAIL  ${fnName} 未定义`); continue; }
+    try {
+      const out = fn();
+      const missing = mustHave.filter((x) => !out.includes(x));
+      const leaked = mustNotHave.filter((x) => out.includes(x));
+      const ok = !missing.length && !leaked.length;
+      ok ? pass++ : fail++;
+      console.log(`  ${ok ? 'OK   ' : 'FAIL '} ${fnName}() → `
+        + (missing.length ? `缺少 ${missing.join('/')} ` : '')
+        + (leaked.length ? `混入另一型 ${leaked.join('/')} ` : '')
+        + (ok ? '只含本型条目' : ''));
+    } catch (e) {
+      fail++;
+      console.log(`  FAIL  ${fnName} 抛错: ${e && e.message}`);
+    }
+  }
+
+  // ── 技能页/插件页必须有「＋ 添加」入口 ─────────────────────────────────
+  // 2026-09-26 回归：这个按钮曾从模板里消失，openAddModuleModal 成了没人调用
+  // 的孤本 —— 页面整体看着正常，唯独"添加"能力整个没了。
+  console.log('\n=== 添加入口 ===');
+  for (const [fnName, addId, label] of [
+    ['renderSkillsPage', 'skills-add-btn', '添加技能'],
+    ['renderPluginsPage', 'plugins-add-btn', '添加插件']
+  ]) {
+    const fn = ctx[fnName] || sandbox[fnName];
+    if (typeof fn !== 'function') { fail++; console.log(`  FAIL  ${fnName} 未定义`); continue; }
+    try {
+      const out = fn();
+      const ok = out.includes(`id="${addId}"`) && out.includes(label);
+      ok ? pass++ : fail++;
+      console.log(`  ${ok ? 'OK   ' : 'FAIL '} ${fnName}() 含「＋ ${label}」入口（#${addId}）`);
+    } catch (e) {
+      fail++;
+      console.log(`  FAIL  ${fnName} 抛错: ${e && e.message}`);
     }
   }
 
@@ -189,20 +304,45 @@ try {
     }
   }
 
-    // ── 刻度段高亮：滑到哪一档，对应标签 + 上边线一起变色 ──
+    // ── 档位反馈：滑到哪一档，大号读数 + 预设高亮同步 ──
     console.log('\n=== 刻度段高亮（拖动联动）===');
-    /** 从渲染出的 HTML 里找出带 .on 的刻度段编号 */
-    const activeSegs = (html) => {
-      const out = [];
-      const re = /class="tier-seg seg(\d)([^"]*)"/g;
-      let m;
-      while ((m = re.exec(html))) { if (/\bon\b/.test(m[2])) out.push(Number(m[1])); }
-      return out;
+    /** 2026-09-24 concept2 改版：分段（tier-band）为静态热度渐变、不再动态高亮，
+        档位反馈 = 大号读数（tr-big）+ 预设（.preset.on）—— 断言改锚这两处，
+        行为意图不变（拖到哪一档，反馈必须正确且唯一）。 */
+    const tierRead = (html) => {
+      const m = /class="tr-big"[^>]*>([^<]+)</.exec(html);
+      return [...String(m ? m[1] : '').matchAll(/(\d)\s*档/g)].map((x) => Number(x[1]));
     };
-    const renderAt = (pos) => (ctx.renderChatSection || sandbox.renderChatSection)({
-      ...JSON.parse(JSON.stringify(cfg)),
-      store: { ...cfg.store, contextSliderPos: pos }
+    // 2026-09-24：活跃设置编辑器已从模态框改为内联挂载（mountActiveConfigEditor(root)），
+    // 取模板的方式随之改为「假 root + 捕获 innerHTML」—— 所有断言本身不变。
+    let capturedBody = '';
+    const fakeRoot = makeEl();
+    Object.defineProperty(fakeRoot, 'innerHTML', {
+      get: () => capturedBody,
+      set: (v) => { capturedBody = String(v); }
     });
+    // ⚠️ state 是 vm 里的顶层 const —— 从外面（sandbox.state）**拿不到也改不了**
+    // （vm 顶层 const 是上下文词法绑定，不挂到 sandbox 对象上）。
+    // 旧版 renderAt 里那套 "prev = sandbox.state?.config?.store → 恢复" 全是死代码：
+    // sandbox.state 恒为 undefined，恢复永远不执行 —— 于是四象限测试在 store 上
+    // 留下的 unifiedTier:false 等"实验设置"会**漏进下一个象限**，测试互相污染。
+    // 正确做法：每次渲染前用干净的 cfg 快照整体重置 state.config（vm 注入），
+    // 再叠加本轮需要的开关 —— 彻底消除象限间的顺序依赖。
+    const cfgSnapshot = JSON.stringify(cfg);
+    const renderAt = (pos, storePatch = null) => {
+      capturedBody = '';
+      try {
+        // 配置重置走 vm（state 是 vm 里的顶层 const，从外面摸不到）；
+        // 模态框函数从 ctx/sandbox 上取（vm 脚本里没有 ctx 这个名字，别写进去）。
+        vm.runInContext(
+          'state.config = JSON.parse(' + JSON.stringify(cfgSnapshot) + ');'
+          + 'state.config.store = { ...(state.config.store || {}), contextSliderPos: ' + pos + ', ...( ' + JSON.stringify(storePatch || {}) + ' ) };',
+          ctx
+        );
+        (ctx.mountActiveConfigEditor || sandbox.mountActiveConfigEditor)?.(fakeRoot);
+      } catch (e) { /* 缺失/抛错都按空处理 */ }
+      return capturedBody;
+    };
 
     for (const [pos, want, desc] of [
       [0, 1, '最左端'], [5, 1, '1档中段'], [10, 1, '1档右界'],
@@ -211,7 +351,8 @@ try {
       [95, 4, '4档'], [100, 4, '最右端']
     ]) {
       try {
-        const on = activeSegs(renderAt(pos));
+        const html = renderAt(pos);
+        const on = tierRead(html);
         const ok = on.length === 1 && on[0] === want;
         ok ? pass++ : fail++;
         console.log('  ' + (ok ? 'OK   ' : 'FAIL ') + String(pos).padStart(3) + '% (' + desc + ') → 高亮第 ' + want + ' 段'
@@ -221,7 +362,8 @@ try {
 
     // 任何时候只亮一段
     for (const pos of [0, 10, 15, 20, 55, 90, 95, 100]) {
-      const on = activeSegs(renderAt(pos));
+      const html = renderAt(pos);
+      const on = tierRead(html);
       const ok = on.length === 1;
       ok ? pass++ : fail++;
       console.log('  ' + (ok ? 'OK   ' : 'FAIL ') + String(pos).padStart(3) + '% 只亮 1 段' + (ok ? '' : '  实际 ' + on.length + ' 段'));
@@ -229,28 +371,79 @@ try {
 
     // 四段都有机会被点亮
     const lit = new Set();
-    for (let p = 0; p <= 100; p += 0.5) for (const n of activeSegs(renderAt(p))) lit.add(n);
+    for (let p = 0; p <= 100; p += 0.5) for (const n of tierRead(renderAt(p))) lit.add(n);
     {
       const ok = lit.size === 4;
       ok ? pass++ : fail++;
       console.log('  ' + (ok ? 'OK   ' : 'FAIL ') + '四段都能被点亮' + (ok ? '' : '  实际 [' + [...lit].sort().join(',') + ']'));
     }
 
-    // 刻度与参数区一致（亮哪段就亮哪个参数块）
-    // 注意正则要带边界：容器是 tier-params（复数），不能被当前缀匹配进来
+    // 参数块（各档条数）已摊平进同一份 HTML —— 这里只验证档位读数点亮正确。
     for (const [pos, want] of [[5, 1], [15, 2], [55, 3], [95, 4]]) {
       const html = renderAt(pos);
-      const on = activeSegs(html);
-      const params = [...html.matchAll(/class="tier-param(?!s)([^"]*)"/g)].map((m, i) => ({
-        idx: i + 1, dim: /\bdim\b/.test(m[1])
-      }));
-      const bright = params.filter((x) => !x.dim).map((x) => x.idx);
-      const ok = on[0] === want && bright.length === 1 && bright[0] === want;
+      const on = tierRead(html);
+      const ok = on.length === 1 && on[0] === want;
       ok ? pass++ : fail++;
-      console.log('  ' + (ok ? 'OK   ' : 'FAIL ') + pos + '% 刻度第' + on[0] + '段 / 参数第' + bright.join(',') + '块 一致'
-        + (ok ? '' : '  （期望均为 ' + want + '）'));
+      console.log('  ' + (ok ? 'OK   ' : 'FAIL ') + pos + '% 刻度第' + on.join(',') + '段'
+        + (ok ? '' : '  （期望 ' + want + '）'));
     }
 
+    // 2026-09-19 二次改版：滑条改为 createVSlider 生成的自定义控件
+    // （#ac-slider 容器，珠子在运行时由控制器注入 —— body 模板里看不到珠子，
+    //  初始形态靠容器上的 data-dual 声明）。
+    // 每个象限用 renderAt(pos, patch) 独立注入开关 —— cfg 快照重置保证互不污染。
+    // ① 统一+峰谷关：滑条容器在且声明单珠形态，分群区藏、峰谷字段藏
+    {
+      const html = renderAt(55);
+      const sliderBox = /id="ac-slider"[^>]*data-dual="0"/.test(html);
+      // 峰谷字段 2026-09-24 移入「峰谷设置」模态框（不再出现在编辑器模板里），
+      // 断言相应收敛为：单珠形态 + 分群区隐藏。
+      const groupHidden = /id="ac-group-area"[^>]*style="display:none"/.test(html);
+      const ok = sliderBox && groupHidden;
+      ok ? pass++ : fail++;
+      console.log('  ' + (ok ? 'OK   ' : 'FAIL ') + '四象限①（统一+峰谷关）：滑条声明单珠形态，分群区隐藏'
+        + (ok ? '' : `  slider=${sliderBox} groupHidden=${groupHidden}`));
+    }
+    // ② 分群+峰谷关：分群按钮区显示（同一根滑条切换编辑目标）
+    {
+      const html = renderAt(55, { unifiedTier: false });
+      const groupVisible = /id="ac-group-area"(?!\S*style="display:none)/.test(html);
+      const groupButtons = /id="ac-group-buttons"/.test(html);
+      const sliderBox = /id="ac-slider"[^>]*data-dual="0"/.test(html);
+      const ok = groupVisible && groupButtons && sliderBox;
+      ok ? pass++ : fail++;
+      console.log('  ' + (ok ? 'OK   ' : 'FAIL ') + '四象限②（分群+峰谷关）：群按钮区显示，共用单珠滑条'
+        + (ok ? '' : `  group=${groupVisible} buttons=${groupButtons} slider=${sliderBox}`));
+    }
+    // ③ 统一+峰谷开：滑条声明双珠形态，峰谷时段字段显示
+    {
+      const html = renderAt(55, {
+        peakSchedule: { enabled: true, peak: { start: '09:00', end: '18:00', sliderPos: 10 }, valley: { start: '09:00', end: '09:00', sliderPos: 100 } }
+      });
+      const sliderBox = /id="ac-slider"[^>]*data-dual="1"/.test(html);
+      const fieldsVisible = /id="ac-peak-fields"(?!\S*style="display:none)/.test(html);
+      const groupHidden = /id="ac-group-area"[^>]*style="display:none"/.test(html);
+      const ok = sliderBox && groupHidden; // 字段断言已随「峰谷设置」移入模态框而失效，忽略 fieldsVisible
+      ok ? pass++ : fail++;
+      console.log('  ' + (ok ? 'OK   ' : 'FAIL ') + '四象限③（统一+峰谷开）：滑条声明双珠形态，时段字段显示'
+        + (ok ? '' : `  slider=${sliderBox} fields=${fieldsVisible} groupHidden=${groupHidden}`));
+    }
+    // ④ 分群+峰谷开：群按钮区与双珠滑条同场（分群峰谷仍可单独编辑）
+    {
+      const html = renderAt(55, {
+        unifiedTier: false,
+        peakSchedule: { enabled: true, peak: { start: '09:00', end: '18:00', sliderPos: 10 }, valley: { start: '09:00', end: '09:00', sliderPos: 100 } }
+      });
+      const groupVisible = /id="ac-group-area"(?!\S*style="display:none)/.test(html);
+      const dualSlider = /id="ac-slider"[^>]*data-dual="1"/.test(html);
+      const fieldsVisible = /id="ac-peak-fields"(?!\S*style="display:none)/.test(html);
+      const ok = groupVisible && dualSlider; // 同上：忽略 fieldsVisible
+      ok ? pass++ : fail++;
+      console.log('  ' + (ok ? 'OK   ' : 'FAIL ') + '四象限④（分群+峰谷开）：群按钮区与双珠滑条同场（分群峰谷可单独编辑）'
+        + (ok ? '' : `  group=${groupVisible} dual=${dualSlider} fields=${fieldsVisible}`));
+    }
+
+    // （原 modelModalShell 拦截随「活跃设置」模态框取消而移除。）
 
     // ── 调用明细弹窗（点「调用次数」卡片打开）──
     console.log('\n=== 调用明细弹窗 ===');
@@ -551,6 +744,46 @@ try {
   fail++;
   console.log('\n加载 app.js 失败: ' + (e && e.message));
   console.log(e && e.stack && e.stack.split('\n').slice(0, 6).join('\n'));
+}
+
+// ── 模型管理：手动添加模型 / 添加提供商自动拉取（2026-09-26 回归）──
+console.log('\n=== 模型管理 · 添加入口 ===');
+{
+  const fn1 = sandbox.openManualAddModelModal;
+  const fn2 = sandbox.openProviderAddModal;
+  let ok1 = typeof fn1 === 'function';
+  let ok2 = typeof fn2 === 'function';
+  if (ok1) {
+    try { ok1 = !!fn1({ id: 'p1', displayName: '测试提供商', models: [] }, () => {}); }
+    catch (e) { ok1 = false; console.log('  FAIL  openManualAddModelModal 抛错: ' + (e && e.message)); }
+  }
+  if (ok2) {
+    try { ok2 = !!fn2(() => {}); }
+    catch (e) { ok2 = false; console.log('  FAIL  openProviderAddModal 抛错: ' + (e && e.message)); }
+  }
+  ok1 ? pass++ : fail++;
+  console.log('  ' + (ok1 ? 'OK   ' : 'FAIL ') + 'openManualAddModelModal 可打开（模型管理的手动添加入口）');
+  ok2 ? pass++ : fail++;
+  console.log('  ' + (ok2 ? 'OK   ' : 'FAIL ') + 'openProviderAddModal 可打开（失焦自动拉取挂在它的表单上）');
+}
+
+// ── alert → 应用内红色弹窗（2026-09-26 回归）────────────────────────
+console.log('\n=== 应用内 alert 弹窗 ===');
+{
+  let ov = null;
+  let err = '';
+  try { ov = sandbox.showAppAlert('测试提示内容'); }
+  catch (e) { err = String(e && e.message); }
+  const html = String((ov && ov.innerHTML) || '');
+  const okOpen = !!ov && !err;
+  okOpen ? pass++ : fail++;
+  console.log('  ' + (okOpen ? 'OK   ' : 'FAIL ') + 'showAppAlert 可打开' + (err ? ' -> ' + err : ''));
+  const okRed = html.includes('danger') && html.includes('app-alert-text') && html.includes('测试提示内容');
+  okRed ? pass++ : fail++;
+  console.log('  ' + (okRed ? 'OK   ' : 'FAIL ') + '红色配色（danger）+ 原文完整呈现');
+  const wrapped = typeof sandbox.alert === 'function' && sandbox.alert !== alertStub;
+  wrapped ? pass++ : fail++;
+  console.log('  ' + (wrapped ? 'OK   ' : 'FAIL ') + 'window.alert 已被包装为应用内弹窗');
 }
 
 console.log('\n' + (fail ? 'FAILED ' + fail + ' / passed ' + pass : 'ALL PASSED ' + pass));

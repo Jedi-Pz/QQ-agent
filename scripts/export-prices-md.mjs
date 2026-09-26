@@ -1,4 +1,4 @@
-// 把内置价格表导出成 Markdown 文档（docs/model-prices.md）。
+// 把内置价格表导出成 Markdown 文档（doc/extend_development/model-prices.md）。
 // 分组依据 = src/model-prices.js 里的 `// ══ 厂商 ══` 注释段（保持文件内的人工分组顺序）。
 // 用法：node scripts/export-prices-md.mjs
 import fs from 'node:fs';
@@ -8,7 +8,7 @@ import { OFFICIAL_PRICES } from '../src/model-prices.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const srcPath = path.join(__dirname, '..', 'src', 'model-prices.js');
-const outPath = path.join(__dirname, '..', 'docs', 'model-prices.md');
+const outPath = path.join(__dirname, '..', 'doc', 'extend_development', 'model-prices.md');
 
 // ── 解析源码里的分组注释，得到每个模型 id 归属的厂商名 ──
 const src = fs.readFileSync(srcPath, 'utf8');

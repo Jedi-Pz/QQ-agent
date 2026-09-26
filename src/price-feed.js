@@ -23,12 +23,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR } from './config.js';
 import { setRemotePrices } from './model-prices.js';
+import { FIXED_PRICE_FEED_URL } from './community.js';
 
 const CACHE_FILE = path.join(DATA_DIR, 'price-feed-cache.json');
 const FETCH_TIMEOUT_MS = 10000;
 const SUCCESS_INTERVAL_MS = 24 * 3600 * 1000;        // 成功后 24h 再拉
 const FAILURE_RETRY_MS = 3 * 3600 * 1000;            // 失败过 3 小时重试
 const TICK_MS = 3600 * 1000;                         // 每小时检查一次是否该拉
+let testOverrideUrl = '';                            // 仅测试/本地模拟使用，不进入生产配置
 
 const status = {
   url: '',
@@ -137,8 +139,9 @@ function writeDiskCache(url, prices) {
  * @param {string} url
  * @returns {Promise<object>} 最新状态
  */
-export async function refreshPriceFeed(url) {
-  url = String(url || '').trim();
+export async function refreshPriceFeed(_url) {
+  // 生产地址固定；测试可通过显式 API 注入本地 fixture，不暴露给 UI/配置。
+  const url = testOverrideUrl || FIXED_PRICE_FEED_URL;
   status.url = url;
   status.fetchedAt = Date.now();
   if (!url) {
@@ -173,8 +176,9 @@ export async function refreshPriceFeed(url) {
  *    refreshPriceFeed 内部已全 catch，这里是第二道保险 ——
  *    这个模块绝不允许以任何方式影响主程序（未捕获的 rejection 也算）。
  */
-export function initPriceFeed(url) {
-  url = String(url || '').trim();
+export function initPriceFeed(_url) {
+  // 价格表地址固定为官网公开地址；内部测试 override 不由 UI/配置传入。
+  const url = testOverrideUrl || FIXED_PRICE_FEED_URL;
   if (timer) { clearInterval(timer); timer = null; }
   if (!url) {
     status.url = '';
@@ -197,5 +201,10 @@ export function initPriceFeed(url) {
 
 /** 当前状态（给 /api/model-prices 与设置页展示）。 */
 export function priceFeedStatus() {
-  return { ...status };
+  return { ...status, url: FIXED_PRICE_FEED_URL };
+}
+
+// 测试专用：生产调用方永远不应设置此值；不提供给 HTTP/UI。
+export function setPriceFeedTestUrl(url = '') {
+  testOverrideUrl = String(url || '').trim();
 }

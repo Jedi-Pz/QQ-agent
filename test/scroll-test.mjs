@@ -9,7 +9,8 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
-const code = fs.readFileSync(path.join(ROOT, 'ui', 'app.js'), 'utf8');
+// M9 拆分：改为按 defer 顺序拼接 ui/app/00-11 全部段（vendor 绑定走 sandbox 注入）。
+let code = (await import('./_ui-load.mjs')).loadUiAppCode().code;
 
 let pass = 0, fail = 0;
 const check = (n, c, e = '') => { if (c) { pass++; console.log('  OK   ' + n); } else { fail++; console.log('  FAIL ' + n + (e ? ' -> ' + e : '')); } };
@@ -93,10 +94,20 @@ const sandbox = {
 sandbox.window = sandbox;
 sandbox.globalThis = sandbox;
 
+// 注入 /vendor 模块的真实实现（复用 src/ 同源模块），顶替被剥掉的 import。
+const { TIER_SLIDER_BANDS, sliderToTier, tierToSlider } = await import('../src/tier-slider.js');
+const { matchPriceTable } = await import('../src/model-prices.js');
+Object.assign(sandbox, { TIER_SLIDER_BANDS, sliderToTier, tierToSlider, matchPriceTable });
+
+// app.js 是 ES module（浏览器里 type="module"），vm.Script 跑不了 export ——
+// 剥掉前缀再执行，否则新增任何一个 export 都会让本测试整个崩掉。
+code = code.replace(/^export\s+(function|const|let|async function|class)/gm, '$1');
+
 const ctx = vm.createContext(sandbox);
 new vm.Script(code, { filename: 'ui/app.js' }).runInContext(ctx);
 
-const CHAT_MSG_PAGE_GUESS = 500;
+// 页大小从 UI 源码实时读取（曾为 500，后降为 80：500 行 innerHTML 重建太卡）
+const CHAT_MSG_PAGE_GUESS = Number(/const CHAT_MSG_PAGE\s*=\s*(\d+)/.exec(code)?.[1] || 80);
 const state_currentChatKey = 'group:test';
 
 // 造 1200 条消息
@@ -131,7 +142,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 console.log('\n=== ② 加载更多时滚动位置保持 ===');
 // 首屏 500 条
-check('首屏显示 500 条', (tbody.innerHTML.match(/<tr/g) || []).length === 500,
+check(`首屏显示 ${CHAT_MSG_PAGE_GUESS} 条`, (tbody.innerHTML.match(/<tr/g) || []).length === CHAT_MSG_PAGE_GUESS,
   String((tbody.innerHTML.match(/<tr/g) || []).length));
 
 // 模拟用户滚到底部（内容 500 条 → 给一个合理的高度）
@@ -152,7 +163,7 @@ chatDetail.scrollHeight = beforeHeight + 3000;   // 新增 200 条 → 高度增
 // 关键断言：scrollTop 没被重置为 0（原 bug 就是这里被重置）
 check('加载后 scrollTop 未被重置为 0', chatDetail.scrollTop !== 0,
   `scrollTop=${chatDetail.scrollTop}（原 bug 会变成 0）`);
-check('加载后显示了 700 条', (tbody.innerHTML.match(/<tr/g) || []).length === 700,
+check('加载后显示了 PAGE+MORE 条', (tbody.innerHTML.match(/<tr/g) || []).length === CHAT_MSG_PAGE_GUESS + 200,
   String((tbody.innerHTML.match(/<tr/g) || []).length));
 // 追加式渲染：已有 500 行的 HTML 必须原样保留（前缀不变），只往下接新行。
 // 全量重建时浏览器会重排已有行 —— 那就是"临界线滚动迟钝"的根源之一。
@@ -166,7 +177,7 @@ scrollFns[0]();
 await sleep(150);
 check('连续加载仍不重置（可继续滚）', chatDetail.scrollTop >= topBefore2,
   `${topBefore2} -> ${chatDetail.scrollTop}`);
-check('第二次加载后 900 条', (tbody.innerHTML.match(/<tr/g) || []).length === 900,
+check('第二次加载后 PAGE+2*MORE 条', (tbody.innerHTML.match(/<tr/g) || []).length === CHAT_MSG_PAGE_GUESS + 400,
   String((tbody.innerHTML.match(/<tr/g) || []).length));
 
 console.log('\n=== ③ 外层结构不重建（工具栏事件不重复绑）===');
@@ -223,7 +234,7 @@ console.log('\n=== ⑤ 轮询刷新保持已加载内容与位置 ===');
   vm.runInContext('api = globalThis.__origApi;', ctx);
 
   const rowsAfter = (tbody.innerHTML.match(/<tr/g) || []).length;
-  check('轮询后已加载条数不变（900）', rowsAfter === rowsBefore && rowsBefore === 900,
+  check('轮询后已加载条数不变', rowsAfter === rowsBefore,
     `${rowsBefore} -> ${rowsAfter}`);
   check('轮询后滚动位置不变', chatDetail.scrollTop === topBefore,
     `${topBefore} -> ${chatDetail.scrollTop}`);

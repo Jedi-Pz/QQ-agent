@@ -3,10 +3,17 @@
 // 验证页面真的有内容。这是最接近用户实际操作的验证。
 import fs from 'node:fs';
 import vm from 'node:vm';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import http from 'node:http';
-import { createApp } from '../src/app.js';
+
+// 数据目录隔离：必须在 import src/app.js 之前设置。
+// 否则用户正开着 QQ Agent 时本测试会被实例锁挡住（"已有实例在运行"），
+// 那是环境冲突而不是代码回归；隔离后测试随时可跑，也不碰真实 data/。
+process.env.QQ_AGENT_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-agent-usage-'));
+
+const { createApp } = await import('../src/app.js');
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -30,6 +37,9 @@ function makeEl(id = '') {
     classList: null,
     addEventListener(ev, fn) { (el._ev ||= {}); (el._ev[ev] ||= []).push(fn); },
     removeEventListener() {},
+    // 程序化派发（app.js 的人设选择器/独立人设清除按钮用到）：
+    // 触发已注册的同名监听器，与浏览器事件语义一致（无返回值）。
+    dispatchEvent(ev) { for (const fn of (el._ev?.[ev?.type] || [])) { try { fn(ev); } catch { /* 桩忽略 */ } } },
     querySelector(sel) { el._q[sel] ||= makeEl(); return el._q[sel]; },
     querySelectorAll: () => [],
     appendChild(c) { el.children.push(c); return c; },
@@ -87,13 +97,25 @@ const sandbox = {
   navigator: { userAgent: 'node' }, requestAnimationFrame: (f) => setTimeout(f, 0),
   URL, Intl, Math, JSON, Date, Number, String, Object, Array, Map, Set, Boolean, RegExp, Error,
   isNaN, parseInt, parseFloat, encodeURIComponent, decodeURIComponent,
-  structuredClone: (x) => JSON.parse(JSON.stringify(x))
+  structuredClone: (x) => JSON.parse(JSON.stringify(x)),
+  // app.js 的 bindSettingsEvents 会往 window 挂 beforeunload 兜底保存 ——
+  // vm 的 window 是本 sandbox 自己（无 DOM），补一个空实现让模块加载不崩。
+  addEventListener() {}, removeEventListener() {},
+  Event: class { constructor(type, opts = {}) { this.type = type; this.bubbles = !!opts.bubbles; } }
 };
 sandbox.window = sandbox;
 sandbox.globalThis = sandbox;
 
+// M9 拆分：vendor 绑定注入 sandbox（原 import 剥离的等价物）。
+const { TIER_SLIDER_BANDS, sliderToTier, tierToSlider } = await import('../src/tier-slider.js');
+const { matchPriceTable } = await import('../src/model-prices.js');
+Object.assign(sandbox, { TIER_SLIDER_BANDS, sliderToTier, tierToSlider, matchPriceTable });
+
+// 按浏览器 defer 顺序拼接 12 段普通脚本后 vm 执行（桥的 import 由上面的注入顶替）。
 const ctx = vm.createContext(sandbox);
-new vm.Script(fs.readFileSync(path.join(ROOT, 'ui', 'app.js'), 'utf8'), { filename: 'ui/app.js' }).runInContext(ctx);
+const appCodeStripped = (await import('./_ui-load.mjs')).loadUiAppCode().code
+  .replace(/^export\s+(function|const|let|async function|class)/gm, '$1');
+new vm.Script(appCodeStripped, { filename: 'ui/app.js' }).runInContext(ctx);
 
 // ── 真实加载配置与价格（模拟启动流程）──
 console.log('=== 模拟启动：拉配置与价格 ===');
@@ -116,10 +138,24 @@ const usageBox = document.getElementById('usage-page');
 //    改成 settings。loadUsageView 里有 `if (state.tab !== 'usage') return` 的
 //    竞态防护（这是对的），只设一次的话数据会被白拉、页面停在骨架屏。
 const setUsageTab = () => vm.runInContext("state.tab = 'usage';", ctx);
-setUsageTab();
-await (ctx.loadUsageView || sandbox.loadUsageView)({ force: true });
+const switchTo = ctx.switchTab || sandbox.switchTab;
 
-const html = String(usageBox.innerHTML || '');
+// 稳定化：不要指望"启动流程在固定 500ms 内 settle"。
+// 启动耗时随技能/插件数量增长而变（每多一个条目就多一份清单读取与注册），
+// 固定 sleep 会变成偶发假失败 —— 页面停在骨架屏，但产品行为其实是对的。
+// 这里改成"设 tab → 走一次加载 → 检查是否真的渲染出来"，没出来就重试，
+// 重试上限约 3 秒。真实用户点页签时启动早已结束，不存在这个问题。
+let usageHtml = '';
+for (let attempt = 0; attempt < 12; attempt += 1) {
+  if (typeof switchTo === 'function') switchTo('usage');
+  setUsageTab();
+  await (ctx.loadUsageView || sandbox.loadUsageView)({ force: true });
+  usageHtml = String(usageBox.innerHTML || '');
+  if (usageHtml.includes('估算成本')) break;
+  await new Promise((r) => setTimeout(r, 250));
+}
+
+const html = usageHtml;
 console.log('  页面长度: ' + html.length + ' 字符');
 check('页面有实质内容（>1000 字符）', html.length > 1000, String(html.length));
 check('包含「用量与成本」标题', html.includes('用量与成本'));

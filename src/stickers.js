@@ -20,6 +20,15 @@ export function normalizeStickerEntry(raw) {
   return {
     id,
     resId: String(entry.resId || entry.emoji_id || id).trim(),
+    // QQ 原生收藏身份（add_custom_face 的 emoji_id）：入了 QQ 收藏的条目靠它
+    // 做幂等补录、备注回写（modify_custom_face）与长效地址回查。
+    emojiId: String(entry.emojiId || '').trim(),
+    // 消息里的协议端缓存文件 id：转存失败后的重试线索（get_image 认它）。
+    qqFile: String(entry.qqFile || '').trim(),
+    // 本地转存产物（file:///）。搬家自愈后由 healLocalPaths 重写。
+    localFile: String(entry.localFile || '').trim(),
+    // 本地转存失败标记：提示这条目当前靠 url 存活（QQ 图床 rkey ~1h，僵尸预警）。
+    persistFailed: entry.persistFailed === true,
     url: String(entry.url || '').trim(),
     md5: String(entry.md5 || '').trim().toUpperCase(),
     desc: String(entry.desc ?? '').trim(),
@@ -131,20 +140,53 @@ export function formatStickerList(entries, query = '', limit = 48) {
   return { total: list.length, matched: filtered.length, truncated: filtered.length > max, stickers: items };
 }
 
-/** 提示词里的【可用表情包】摘要（不暴露完整 URL，控制上下文体积）。 */
-export function buildStickerContext(entries, max = 10) {
+/**
+ * 提示词里的【可用表情包】摘要（不暴露完整 URL，控制上下文体积）。
+ * rotatePeriodMin <= 0 时关闭轮换；now 仅用于测试注入稳定的轮次。
+ * withId 未显式设置时，max <= 15 才附带 id，避免提示词无谓膨胀。
+ */
+export function buildStickerContext(entries, max = 10, { rotatePeriodMin = 60, now = Date.now(), withId = Number(max) <= 15 } = {}) {
   const list = (Array.isArray(entries) ? entries : []).map(normalizeStickerEntry).filter(Boolean);
   if (!list.length) return '';
-  const top = [...list]
-    .sort((a, b) => (b.useCount || 0) - (a.useCount || 0) || ((b.desc || b.localNote) ? 1 : 0) - ((a.desc || a.localNote) ? 1 : 0))
-    .slice(0, Math.max(1, Math.min(30, Number(max) || 10)));
-  const lines = top.map((e) => {
+  const total = Math.max(1, Math.min(30, Number(max) || 10));
+  const byUse = [...list].sort((a, b) =>
+    (b.useCount || 0) - (a.useCount || 0)
+    || ((b.desc || b.localNote) ? 1 : 0) - ((a.desc || a.localNote) ? 1 : 0)
+    || String(a.id).localeCompare(String(b.id))
+  );
+  let selected = byUse.slice(0, total);
+
+  if (Number(rotatePeriodMin) > 0 && list.length > total) {
+    const stableCount = Math.max(1, Math.floor(total / 2));
+    const stable = byUse.slice(0, stableCount);
+    const stableIds = new Set(stable.map((e) => e.id));
+    const pool = [...list].filter((e) => !stableIds.has(e.id)).sort((a, b) => String(a.id).localeCompare(String(b.id)));
+    const period = Number(rotatePeriodMin) * 60000;
+    const round = Math.floor(Number(now) / period);
+    // 按轮次播种的 Fisher-Yates：同一轮次结果稳定，既利于缓存命中也便于测试断言。
+    // seed=0 时 xorshift 恒输出 0（j 恒为 0，洗牌失效）——用黄金比例常数兜底。
+    let seed = round >>> 0;
+    for (const e of pool) for (const ch of e.id) seed = (seed * 31 + ch.charCodeAt(0)) >>> 0;
+    if (seed === 0) seed = 0x9e3779b9;
+    const shuffled = [...pool];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5; seed >>>= 0;
+      const j = seed % (i + 1);
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    selected = [...stable, ...shuffled.slice(0, total - stableCount)];
+  }
+
+  const lines = selected.map((e) => {
     const label = e.desc || e.localNote || '（无备注，可先看图）';
     const extra = e.tags?.length ? ` [${e.tags.join('/')}]` : '';
-    const used = e.useCount ? `（用过${e.useCount}次）` : '';
-    return `- ${label}${extra}${used}`;
+    // 不展示使用次数：真实计数每发一次表情就 +1，写进提示词会让【可用表情包】
+    // 段每次运行都变（把它后面的全部段落挤出缓存前缀）。模型只需要知道
+    // "有哪些表情"（useCount 仍参与排序与轮换挑选，只是不进文本）。
+    const id = withId ? ` id=${e.id}` : '';
+    return `- ${label}${extra}${id}`;
   });
-  return `【可用表情包】你的 QQ 收藏表情里有 ${list.length} 个表情（以下为常用/有备注的 ${top.length} 个，完整列表可用 list_stickers 查询）：\n${lines.join('\n')}`;
+  return `【可用表情包】你的 QQ 收藏表情里有 ${list.length} 个表情（以下为常用/轮换的 ${selected.length} 个，完整列表可用 list_stickers 查询）：\n${lines.join('\n')}`;
 }
 
 /** 发送前的表情包策略提示（软策略）。 */

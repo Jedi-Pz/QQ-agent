@@ -1095,7 +1095,7 @@ function buildModuleCreationPrompt(kind) {
   const locateBlock = root
     ? `这个项目就安装在我电脑的这个文件夹里（直接用，不用再找）：
 ${root}
-文档在它下面的 doc/extend_development/ 里，技能/插件目录分别是它下面的 skills/ 和 plugins/。`
+文档在它下面的 docs/extend_development/ 里，技能/插件目录分别是它下面的 skills/ 和 plugins/。`
     : `先问我一句"QQ Agent 装在哪个文件夹"（我不知道的话，就找桌面或开始菜单里的「QQ Agent」快捷方式 → 右键 → 打开文件所在位置）。拿到项目文件夹后再继续。`;
   return `我电脑上有一个叫「QQ Agent」的 QQ 机器人项目，我想给它加一个新功能，但我不会写代码。请你帮我从头到尾做完，包括把文件放到位。下面是给你的完整工作说明：
 
@@ -1103,7 +1103,7 @@ ${root}
 ${locateBlock}
 
 【第一步：先读懂文档】
-读取项目里 doc/extend_development/ 目录下的这些文档：
+读取项目里 docs/extend_development/ 目录下的这些文档：
 - skill-development.md（技能开发规范）
 - plugin-development.md（插件开发规范）
 - skill-reference.md（API 完整参考，必读）

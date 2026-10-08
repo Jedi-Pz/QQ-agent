@@ -1348,7 +1348,7 @@ console.log('全部通过 ✅');
 把下面这段连同本文件一起交给 AI：
 
 ```
-请按 doc/extend_development/skill-reference.md 的规范，生成一个名为 <id> 的 Skill，功能是：<描述>。
+请按 docs/extend_development/skill-reference.md 的规范，生成一个名为 <id> 的 Skill，功能是：<描述>。
 
 要求：
 1. 输出 skills/<id>/skill.json 与 skills/<id>/index.js 两个文件的完整内容

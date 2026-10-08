@@ -70,9 +70,9 @@ plugins/my-plugin/            skills/my-skill/
 （完整的定义与三问判断法见两份开发文档的 §0。）
 选错类型的后果是**功能静默失效**（不报错、不崩、就是没反应），所以两份开发文档请先读：
 
-- **确定性型** → [doc/extend_development/plugin-development.md](doc/extend_development/plugin-development.md)
-- **LLM 型** → [doc/extend_development/skill-development.md](doc/extend_development/skill-development.md)
-- 共同机制完整参考 → [doc/extend_development/skill-reference.md](doc/extend_development/skill-reference.md)
+- **确定性型** → [docs/extend_development/plugin-development.md](docs/extend_development/plugin-development.md)
+- **LLM 型** → [docs/extend_development/skill-development.md](docs/extend_development/skill-development.md)
+- 共同机制完整参考 → [docs/extend_development/skill-reference.md](docs/extend_development/skill-reference.md)
 
 其它约定：
 
@@ -89,7 +89,7 @@ plugins/my-plugin/            skills/my-skill/
   思考模式等核心能力已内置进 `src/`，不依赖任何扩展。
 - **热重载默认开启**：目录放进去就生效，无需重启（`config.extensions.hotReload` 可关；
   等价于"任意落地的 JS 会被执行"，共享机器建议关掉）。
-- 架构总览见 [doc/extend_development/skill-system.md](doc/extend_development/skill-system.md)。
+- 架构总览见 [docs/extend_development/skill-system.md](docs/extend_development/skill-system.md)。
 ## 安装与使用
 **三步搞定**（推荐）：
 ```bash

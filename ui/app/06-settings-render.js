@@ -1276,7 +1276,7 @@ const MODULE_KINDS = {
     setupTitle: '新增技能',
     setupHint: `在 <code>skills/&lt;id&gt;/</code> 放 <code>skill.json</code> + <code>index.js</code>，
       导出 <code>setup(api)</code> 并在里面 <code>api.registerTool({...})</code>。
-      热重载默认开启，保存即生效。完整规范见 <code>doc/extend_development/skill-development.md</code>。`
+      热重载默认开启，保存即生效。完整规范见 <code>docs/extend_development/skill-development.md</code>。`
   },
   plugin: {
     kind: 'plugin',
@@ -1291,7 +1291,7 @@ const MODULE_KINDS = {
     setupTitle: '新增插件',
     setupHint: `在 <code>plugins/&lt;id&gt;/</code> 放 <code>plugin.json</code> + <code>index.js</code>，
       导出 <code>setup(api)</code>，并用 <code>export const providers = {...}</code> 或 <code>export const hooks = {...}</code> 声明扩展点。
-      热重载默认开启，保存即生效。完整规范见 <code>doc/extend_development/plugin-development.md</code>。`
+      热重载默认开启，保存即生效。完整规范见 <code>docs/extend_development/plugin-development.md</code>。`
   }
 };
 

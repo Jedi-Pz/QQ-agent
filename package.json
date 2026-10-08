@@ -20,7 +20,7 @@
       "!snowluma/data/**",
       "!snowluma/logs/**",
       "!test/**",
-      "!doc/**",
+      "!docs/**",
       "!scripts/**",
       "!dist/**",
       "!**/*.map",

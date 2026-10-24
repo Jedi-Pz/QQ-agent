@@ -70,3 +70,17 @@ npm run setup:napcat   # 下载官方 NapCat Release，SHA256 校验后解压
 - 应用数据（聊天存档、记忆、会话、含 Key 的配置）：`0.4/data/`（已 gitignore）
 - NapCat 数据（账号配置、缓存、日志）：`0.4/napcat/shell/napcat/{config,cache,logs}/`（已 gitignore）
 - 分享部署副本前执行 `node scripts/sanitize-release.mjs`（只清理本应用数据，不动第三方目录）
+
+## 6. 本机验证记录（2026-10-24）
+
+- `npm install` 正常；Electron 二进制缺失时用 `node node_modules/electron/install.js` 补齐
+- `npm test`：24 个测试套件全部通过（exit 0）
+- 扫码登录成功；登录后 NapCat 自动按 `onebot11.json` 模板开启 3000/3001
+- 模型连通测试：`POST /api/test/api` → `{ok:true, model:"deepseek-flash", reply:"pong", latencyMs:1438}`
+- 私聊端到端验证（已加入白名单）：收到消息 → 模型回复 → 通过 OneBot 发出，
+  会话记录 2 轮、约 2.2 万 prompt token（其中 1.1 万命中缓存），应用日志有
+  `[发送 -> private:xxx]` 记录
+- 桌面端由 `启动QQ机器人.bat` 启动成功：窗口「QQ Agent」+ 托盘 + 控制台 3210
+- 注：QQ Agent 应用本身不处理「加好友 / 拉群」请求事件，批准这些请求需要
+  用 OneBot `set_friend_add_request` / `set_group_add_request`（或临时脚本监听
+  request 事件）；白名单可在控制台设置 → 白名单里勾选

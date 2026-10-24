@@ -84,3 +84,21 @@ npm run setup:napcat   # 下载官方 NapCat Release，SHA256 校验后解压
 - 注：QQ Agent 应用本身不处理「加好友 / 拉群」请求事件，批准这些请求需要
   用 OneBot `set_friend_add_request` / `set_group_add_request`（或临时脚本监听
   request 事件）；白名单可在控制台设置 → 白名单里勾选
+
+## 7. TUN 代理（fake-IP）兼容补丁（2026-10-24）
+
+- **现象**：本机开启 Clash TUN 模式后，机器人看图和 `web_fetch` 全部失败，
+  报错「域名解析到内网/本机地址，已阻止」；而模型 API 调用正常。
+- **根因**：TUN 的 fake-ip DNS 把所有域名解析成 `198.18.0.0/15` 假 IP
+  （`multimedia.nt.qq.com.cn → 198.18.4.198`），safe-fetch 的 SSRF 防护把这个
+  段当成内网地址拒绝，属于"防护误杀"，不是协议端或图片工具的问题。
+- **修复**（fork 本地补丁，`0.4/src/safe-fetch.js`）：DNS 结果落在 fake-IP 段时，
+  改用 DoH（AliDNS `223.5.5.5` / Cloudflare `1.1.1.1`，HTTPS 不走系统 DNS，
+  不受 fake-ip 劫持）查询域名真实 A 记录；真实地址全为公网才放行，否则仍拒绝。
+  连接依旧固定到系统解析出的 fake-IP（TUN 还原目标需要）；字面量内网 IP /
+  localhost 仍然直接拒绝，普通环境行为不变。DoH 结果缓存 60 秒。
+- **验证**：直接调用修复后的下载链路取回 QQ 图片 149KB（image/webp）；`example
+  .com` / `baidu.com` 网页抓取恢复；`127.0.0.1`、`localhost`、`192.168.1.1`
+  仍然被拒；`test/safe-fetch-file-test.mjs`、`test/selftest.mjs` 通过。
+- **注意**：后续 `git merge upstream/main` 时该文件可能冲突，保留本段的
+  fake-IP 逻辑即可。

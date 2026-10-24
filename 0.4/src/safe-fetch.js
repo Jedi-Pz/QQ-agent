@@ -111,6 +111,62 @@ async function lookupWithTimeout(hostname) {
   return Promise.race([dnsLookup(hostname, { all: true, verbatim: true }), timeout]).finally(() => clearTimeout(timer));
 }
 
+// ── TUN 代理的 fake-IP 兼容（2026-10-24 实机问题）──────────────────────
+//
+// Clash / sing-box 等开启 TUN 模式（fake-ip DNS）后，系统里所有域名都会解析到
+// 198.18.0.0/15 这类"假 IP"，真实地址由 TUN 在 IP 层按域名映射找回。此时
+// "解析到内网就拒绝"会把所有正常下载误杀（实机表现：图片/网页抓取全部报
+// "域名解析到内网/本机地址，已阻止"，而模型 API 之类的普通 fetch 正常）。
+//
+// 处理：仅当解析结果落在 fake-IP 段时，用 DoH（HTTPS，不走系统 DNS，因此
+// 不受 TUN fake-ip 劫持）校验域名的真实 A 记录；真实地址全是公网才放行。
+// 连接仍固定到系统解析出的 fake-IP —— 这是 TUN 还原目标所必需的；安全性
+// 改由 DoH 校验保证。DoH 不可用或真实地址含内网 → 仍然拒绝（fail closed）。
+const FAKE_IP_V4_RANGES = [[198, 18], [198, 19]]; // 198.18.0.0/15
+
+function isFakeIpAddress(ip) {
+  const h = String(ip || '').trim();
+  if (net.isIP(h) !== 4) return false;
+  const parts = h.split('.').map(Number);
+  return FAKE_IP_V4_RANGES.some(([a, b]) => parts[0] === a && parts[1] === b);
+}
+
+const DOH_ENDPOINTS = [
+  (host) => `https://223.5.5.5/resolve?name=${encodeURIComponent(host)}&type=A`, // AliDNS 公共 DoH（JSON）
+  (host) => `https://1.1.1.1/dns-query?name=${encodeURIComponent(host)}&type=A`,  // Cloudflare 兜底
+];
+const dohCache = new Map(); // host -> { at, ips | null }
+const DOH_CACHE_TTL_MS = 60_000;
+
+async function dohResolveA(hostname) {
+  const cached = dohCache.get(hostname);
+  if (cached && Date.now() - cached.at < DOH_CACHE_TTL_MS) return cached.ips;
+  let ips = null;
+  for (const endpoint of DOH_ENDPOINTS) {
+    try {
+      const res = await fetch(endpoint(hostname), {
+        headers: { accept: 'application/dns-json' },
+        signal: AbortSignal.timeout(4000),
+        redirect: 'error',
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      const answers = Array.isArray(data?.Answer) ? data.Answer : [];
+      const found = answers.filter((a) => a?.type === 1).map((a) => String(a?.data || ''));
+      if (found.some((ip) => net.isIP(ip) === 4)) { ips = found; break; }
+    } catch { /* 换下一个 DoH 端点 */ }
+  }
+  dohCache.set(hostname, { at: Date.now(), ips });
+  return ips;
+}
+
+/** fake-IP 解析结果的真实地址是否全为公网。DoH 查不到 → false（拒绝）。 */
+async function fakeIpTargetIsPublic(hostname) {
+  const ips = await dohResolveA(hostname);
+  if (!ips || !ips.length) return false;
+  return ips.every((ip) => net.isIP(ip) === 4 && !isPrivateIp(ip));
+}
+
 async function resolveSafeHost(hostname, { allowPrivate = false } = {}) {
   const h = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
   if (!h) throw new Error('主机名为空');
@@ -130,7 +186,13 @@ async function resolveSafeHost(hostname, { allowPrivate = false } = {}) {
   if (!addresses.length) throw new Error('域名没有解析结果');
   if (!allowPrivate) {
     for (const { address } of addresses) {
-      if (isPrivateIp(address)) throw new Error('域名解析到内网/本机地址，已阻止');
+      if (!isPrivateIp(address)) continue;
+      // TUN 代理的 fake-IP：系统 DNS 结果不是真实地址，用 DoH 校验真实 A 记录。
+      if (isFakeIpAddress(address)) {
+        if (await fakeIpTargetIsPublic(h)) continue;
+        throw new Error('域名解析到内网/本机地址，已阻止（代理 fake-IP 环境，DoH 校验未通过）');
+      }
+      throw new Error('域名解析到内网/本机地址，已阻止');
     }
   }
   return addresses[0].address;

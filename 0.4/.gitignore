@@ -6,6 +6,8 @@ data/
 # 本地日志与外部运行文件不纳入源码。
 *.log
 /runtime/
+# NapCat 协议端（scripts/setup-napcat.mjs 下载的第三方二进制，含 node.exe/wrapper.node）
+napcat/
 # 外部程序可能保留账号配置、缓存和日志；忽略这些目录，不读取或删除其内容。
 **/config/
 **/data/
